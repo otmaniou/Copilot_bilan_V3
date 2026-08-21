@@ -1,0 +1,120 @@
+/**
+ * ════════════════════════════════════════════════════════════════════
+ *  VALIDATION DES CORRECTIONS — MODEL ETAT FINANCIER ANALYSTE V20 (v1.0)
+ *  Office Script (Excel pour le web / Microsoft 365)
+ * ────────────────────────────────────────────────────────────────────
+ *  A executer APRES que l'analyste a corrige manuellement des cellules
+ *  de saisie (Saisie actif / passif / TCR).
+ *  Actions :
+ *    1. Compare chaque cellule de saisie a la reference PDF (Baseline_JSON,
+ *       ecrite par le script SaisieMultiExercices).
+ *    2. Chaque difference = correction manuelle : bordure BLEUE + commentaire
+ *       (valeur PDF -> valeur corrigee).
+ *    3. Enregistre les corrections dans l'onglet "Corrections_JSON" (JSON).
+ *       => au prochain import, SaisieMultiExercices REINITIALISE puis
+ *          REAPPLIQUE automatiquement ces corrections (bordures bleues
+ *          conservees), et les ecarts vs PDF sont recalcules.
+ *    4. Ajoute une section "CORRECTIONS MANUELLES" dans la Checklist.
+ * ════════════════════════════════════════════════════════════════════
+ */
+
+const BLEU_V = "0070C0";
+const BORDS_V: ExcelScript.BorderIndex[] = [ExcelScript.BorderIndex.edgeTop, ExcelScript.BorderIndex.edgeBottom, ExcelScript.BorderIndex.edgeLeft, ExcelScript.BorderIndex.edgeRight];
+
+interface CelluleBase { f: string; a: string; v: number; }
+interface Correction { f: string; a: string; avant: number; apres: number; }
+
+function finV(workbook: ExcelScript.Workbook, msg: string): string {
+  const wsI: ExcelScript.Worksheet | undefined = workbook.getWorksheets().find((w: ExcelScript.Worksheet) => w.getName() === "Import_JSON");
+  if (wsI) wsI.getRange("D1").setValue(msg);
+  return msg;
+}
+
+function main(workbook: ExcelScript.Workbook): string {
+  try {
+    const trouverFeuille = (nom: string): ExcelScript.Worksheet | undefined =>
+      workbook.getWorksheets().find((w: ExcelScript.Worksheet) => w.getName().trim().toLowerCase() === nom.toLowerCase());
+
+    // ── 1. Lire la reference PDF ─────────────────────────────────────
+    const wsB: ExcelScript.Worksheet | undefined = trouverFeuille("Baseline_JSON");
+    if (!wsB) return finV(workbook, "STOP : onglet Baseline_JSON absent. Executez d'abord SaisieMultiExercices (import), corrigez, puis relancez cette validation.");
+    const brut: string = (wsB.getRangeByIndexes(0, 0, 20, 1).getValues() as (string | number | boolean)[][])
+      .map((r: (string | number | boolean)[]) => String(r[0] ?? "")).join("").trim();
+    if (!brut) return finV(workbook, "STOP : Baseline_JSON vide. Executez d'abord SaisieMultiExercices.");
+    let base: CelluleBase[];
+    try { base = (JSON.parse(brut) as { cellules: CelluleBase[] }).cellules ?? []; }
+    catch (e) { return finV(workbook, "STOP : Baseline_JSON illisible. Re-executez SaisieMultiExercices pour le regenerer. " + e); }
+    if (base.length === 0) return finV(workbook, "STOP : baseline vide (aucune cellule importee). Rien a valider.");
+
+    const bordureBleue = (cell: ExcelScript.Range): void => {
+      try {
+        for (const bi of BORDS_V) {
+          const b: ExcelScript.RangeBorder = cell.getFormat().getRangeBorder(bi);
+          b.setStyle(ExcelScript.BorderLineStyle.continuous);
+          b.setWeight(ExcelScript.BorderWeight.medium);
+          b.setColor(BLEU_V);
+        }
+      } catch (eB) { /* cellule fusionnee : ignore */ }
+    };
+
+    // ── 2. Detecter les corrections manuelles ────────────────────────
+    const corrections: Correction[] = [];
+    const ignores: string[] = [];
+    for (const cb of base) {
+      const ws: ExcelScript.Worksheet | undefined = trouverFeuille(cb.f);
+      if (!ws) { ignores.push(cb.f + "!" + cb.a); continue; }
+      const cell: ExcelScript.Range = ws.getRange(cb.a);
+      const cur = cell.getValue();
+      if (typeof cur !== "number") continue;               // vide ou texte : non retenu
+      if (cur === cb.v) continue;                          // inchange
+      corrections.push({ f: cb.f, a: cb.a, avant: cb.v, apres: cur });
+      bordureBleue(cell);
+      workbook.addComment(cell,
+        "CORRECTION MANUELLE — import PDF : " + Math.round(cb.v) + " KDZD -> corrige : " + Math.round(cur) + " KDZD",
+        ExcelScript.ContentType.plain);
+    }
+
+    // ── 3. Enregistrer les corrections (JSON, morceaux de 30000) ─────
+    let wsC: ExcelScript.Worksheet | undefined = trouverFeuille("Corrections_JSON");
+    if (!wsC) wsC = workbook.addWorksheet("Corrections_JSON");
+    const wsC2: ExcelScript.Worksheet = wsC as ExcelScript.Worksheet;
+    const uC: ExcelScript.Range | undefined = wsC2.getUsedRange();
+    if (uC) uC.clear(ExcelScript.ClearApplyTo.contents);
+    const txt: string = JSON.stringify({ date: new Date().toLocaleString("fr-DZ"), corrections: corrections });
+    for (let i: number = 0, p: number = 0; p < txt.length; i++, p += 30000)
+      wsC2.getRangeByIndexes(i, 0, 1, 1).setValue(txt.substring(p, p + 30000));
+
+    // ── 4. Section Checklist "CORRECTIONS MANUELLES" ─────────────────
+    const wsCh: ExcelScript.Worksheet | undefined = trouverFeuille("Checklist");
+    if (wsCh) {
+      const used: ExcelScript.Range | undefined = wsCh.getUsedRange();
+      const debut: number = used ? used.getRowCount() + 2 : 2;
+      const lignes: (string | number)[][] = [
+        ["CORRECTIONS MANUELLES", "validees le " + new Date().toLocaleString("fr-DZ"), "", ""],
+        ["Feuille", "Cellule", "PDF (KDZD)", "Corrige (KDZD)"]
+      ];
+      if (corrections.length === 0) lignes.push(["Aucune correction detectee", "", "", ""]);
+      for (const co of corrections) lignes.push([co.f, co.a, Math.round(co.avant), Math.round(co.apres)]);
+      wsCh.getRangeByIndexes(debut, 0, lignes.length, 4).setValues(lignes);
+      wsCh.getRangeByIndexes(debut, 0, 1, 4).getFormat().getFont().setBold(true);
+      wsCh.getRangeByIndexes(debut + 1, 0, 1, 4).getFormat().getFont().setBold(true);
+      for (let r: number = debut + 2; r < debut + lignes.length; r++) {
+        if (corrections.length > 0)
+          wsCh.getRangeByIndexes(r, 0, 1, 4).getFormat().getFill().setColor("DDEBF7");   // bleu clair
+      }
+      wsCh.getRange("A:K").getFormat().autofitColumns();
+    }
+
+    let resume: string = "VALIDATION : " + corrections.length + " correction(s) manuelle(s) enregistree(s)"
+      + (corrections.length > 0 ? " — bordures bleues sur les cellules modifiees, details dans Checklist et Corrections_JSON. Elles seront reappliquees automatiquement au prochain import." : " — les cellules correspondent a l'import PDF.")
+      + (ignores.length ? " | Cellules ignorees (feuille introuvable) : " + ignores.slice(0, 5).join(", ") : "");
+    return finV(workbook, resume);
+  } catch (err) {
+    let detail: string;
+    try {
+      if (err instanceof Error) detail = err.name + " : " + err.message;
+      else detail = JSON.stringify(err);
+    } catch (e3) { detail = String(err); }
+    return finV(workbook, "ERREUR D'EXECUTION (Validation) : " + detail);
+  }
+}
