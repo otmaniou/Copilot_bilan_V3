@@ -1,0 +1,442 @@
+/**
+ * ════════════════════════════════════════════════════════════════════
+ *  SAISIE MULTI-EXERCICES — MODEL ETAT FINANCIER ANALYSTE V20 ("bilan_optA" v3.4 — v3.3 + diagnostic de lecture d'Import_JSON : le resume affiche la taille de chaque cellule lue (A1=..., A2=...) et signale la limite Excel de 32767 caracteres)
+ *  Office Script (Excel pour le web / Microsoft 365)
+ * ────────────────────────────────────────────────────────────────────
+ *  Entree  : onglet "Import_JSON", colonne A — JSON produit par Copilot.
+ *  Actions : trie les exercices (plus recent = N, puis N-1...N-4),
+ *    remplit Saisie actif / passif / TCR (cellules de saisie uniquement),
+ *    convertit DZD -> KDZD, recalcule et compare les totaux aux formules
+ *    (commentaire rouge = anomalie, jaune = arrondi), recoupe les PDF
+ *    entre eux (N-1 vs N), genere l'onglet "Checklist", masque les
+ *    colonnes des exercices non trouves.
+ * ════════════════════════════════════════════════════════════════════
+ */
+
+interface CfgType {
+  ACTIF_GROUPES: { [rang: string]: string[] };
+  PASSIF_COLS: { [rang: string]: string };
+  TCR_PAIRES: { [rang: string]: string[] };
+  ACTIF_ROWS: { [rc: string]: number };
+  PASSIF_ROWS: { [rc: string]: number };
+  TCR_ROWS: { [rc: string]: number };
+  ACTIF_FORMULES: number[];
+  PASSIF_FORMULES: number[];
+  TCR_FORMULES: number[];
+}
+
+const CFG: CfgType = {"ACTIF_GROUPES": {"N": ["P", "Q", "R"], "N-1": ["M", "N", "O"], "N-2": ["J", "K", "L"], "N-3": ["G", "H", "I"], "N-4": ["D", "E", "F"]}, "PASSIF_COLS": {"N": "H", "N-1": "G", "N-2": "F", "N-3": "E", "N-4": "D"}, "TCR_PAIRES": {"N": ["M", "N"], "N-1": ["K", "L"], "N-2": ["I", "J"], "N-3": ["G", "H"], "N-4": ["E", "F"]}, "ACTIF_ROWS": {"ecarts_acquisition_goodwill": 10, "immobilisations_incorporelles": 11, "immobilisations_corporelles": 12, "terrains": 13, "batiments": 14, "autres_immobilisations_corporelles": 15, "immobilisations_en_concession": 16, "immobilisations_en_cours": 17, "immobilisations_financieres": 18, "titres_mis_en_equivalence": 19, "autres_participations_creances": 20, "autres_titres_immobilises": 21, "prets_actifs_financiers_non_courants": 22, "impots_differes_actif": 23, "total_actif_non_courant": 24, "stocks_encours": 26, "creances_emplois_assimiles": 27, "clients": 28, "autres_debiteurs": 29, "impots_assimiles_actif": 30, "autres_creances_assimiles": 31, "disponibilites_assimiles": 32, "placements_financiers_courants": 33, "tresorerie_actif": 34, "total_actif_courant": 35, "total_general_actif": 36}, "PASSIF_ROWS": {"capital_emis": 6, "capital_non_appele": 7, "primes_reserves": 8, "ecart_reevaluation": 9, "ecart_equivalence": 10, "resultat_net_passif": 11, "report_a_nouveau": 12, "part_societe_consolidante": 13, "part_minoritaires": 14, "total_capitaux_propres": 15, "emprunts_dettes_financieres": 17, "impots_differes_provisionnes": 18, "autres_dettes_non_courantes": 19, "provisions_produits_avance": 20, "total_passifs_non_courants": 21, "fournisseurs_rattaches": 23, "impots_passif": 24, "autres_dettes": 25, "tresorerie_passif": 26, "total_passifs_courants": 27, "total_general_passif": 28}, "TCR_ROWS": {"ventes_marchandises": 6, "produits_fabriques": 7, "prestations_services": 8, "ventes_travaux": 9, "produits_annexes": 10, "rabais_remises_ristournes_accordes": 11, "chiffre_affaires_net": 12, "production_stockee_destockee": 13, "production_immobilisee": 14, "subvention_exploitation": 15, "production_exercice": 16, "achats_marchandises_vendues": 17, "matieres_premieres": 18, "autres_approvisionnements": 19, "variation_stocks": 20, "achats_etudes_prestations": 21, "autres_consommations": 22, "rabais_remises_ristournes_obtenus_achats": 23, "sous_traitance_generale": 24, "locations": 25, "entretien_reparations": 26, "primes_assurances": 27, "personnel_exterieur": 28, "remuneration_intermediaires": 29, "publicite": 30, "deplacements_missions": 31, "autres_services": 32, "rabais_remises_ristournes_obtenus_services": 33, "consommations_exercice": 34, "valeur_ajoutee_exploitation": 35, "charges_personnel": 36, "impots_taxes_assimiles": 37, "excedent_brut_exploitation": 38, "autres_produits_operationnels": 39, "autres_charges_operationnelles": 40, "dotations_amortissements": 41, "provisions": 42, "pertes_valeur": 43, "reprises_pertes_valeur_provisions": 44, "resultat_operationnel": 45, "produits_financiers": 46, "charges_financieres": 47, "resultat_financier": 48, "resultat_ordinaire": 49, "elements_extraordinaires_produits": 50, "elements_extraordinaires_charges": 51, "resultat_extraordinaire": 52, "impots_exigibles_resultats": 53, "impots_differes_resultats": 54, "resultat_net_exercice": 55}, "ACTIF_FORMULES": [9, 12, 18, 24, 25, 27, 32, 35, 36], "PASSIF_FORMULES": [5, 15, 16, 21, 22, 27, 28], "TCR_FORMULES": [12, 16, 34, 35, 38, 45, 48, 49, 52, 55]};
+
+const TOLERANCE_KDZD = 1;           // 1 KDZD = 1000 DZD (seuil demande par le metier)
+const FEUILLE_IMPORT = "Import_JSON";
+const FEUILLE_CHECK = "Checklist";
+const ROUGE = "FFC7CE", JAUNE = "FFF2CC", VERT = "C6EFCE";
+const RANGS: string[] = ["N", "N-1", "N-2", "N-3", "N-4"];
+
+function fin(workbook: ExcelScript.Workbook, msg: string): string {
+  const wsI: ExcelScript.Worksheet | undefined = workbook.getWorksheets().find((w: ExcelScript.Worksheet) => w.getName() === "Import_JSON");
+  if (wsI) wsI.getRange("D1").setValue(msg);
+  return msg;
+}
+
+interface LigneJ { row_code?: string; libelle_imprime?: string; valeurs?: { [c: string]: number | string | null }; }
+interface PageTab { pages?: number[]; source_pdf?: string; }
+interface Exercice {
+  source_pdf?: string; annee?: number; exercice_clos?: string;
+  nif?: string; raison_sociale?: string; activite?: string;
+  tableaux?: { [code: string]: { lignes?: LigneJ[] } };
+  pages_trouvees?: { [code: string]: number[] | PageTab };   // [n] (ancien) ou {pages, source_pdf} (multi-PDF par exercice)
+}
+interface DocMulti { exercices?: Exercice[]; }
+interface TotauxInfo { attendu: number; poste: string; annee: number; }
+
+function main(workbook: ExcelScript.Workbook): string {
+  try {
+  // ── 0. Lecture JSON ────────────────────────────────────────────────
+  const wsImport: ExcelScript.Worksheet | undefined = workbook.getWorksheets().find((w: ExcelScript.Worksheet) => w.getName() === FEUILLE_IMPORT);
+  if (!wsImport) return fin(workbook, "STOP ETAPE 0 : onglet Import_JSON absent. Creez-le (nom exact : Import_JSON).");
+  const cellules: (string | number | boolean)[][] = wsImport.getRangeByIndexes(0, 0, 500, 1).getValues() as (string | number | boolean)[][];
+  const brut: string = cellules.map((r: (string | number | boolean)[]) => String(r[0] ?? "")).join("").trim();
+  // Diagnostic de lecture : taille de chaque cellule non vide (A1, A2, ...)
+  const lu: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const v: string = String(cellules[i] ? (cellules[i][0] ?? "") : "");
+    if (v.length > 0) lu.push("A" + (i + 1) + "=" + v.length + (v.length >= 32767 ? "(!LIMITE EXCEL)" : ""));
+  }
+  const diagLu: string = " | Lu : " + (lu.length ? lu.join(", ") : "rien");
+  if (!brut) return fin(workbook, "STOP ETAPE 0 : onglet Import_JSON vide. Collez le JSON en cellule A1.");
+  let nettoye: string = brut
+    .replace(/[\u201C\u201D\u201E\u00AB\u00BB]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/\u00A0/g, " ")
+    .replace(/```json/gi, "").replace(/```/g, "");
+  const i1: number = nettoye.indexOf("{"), i2: number = nettoye.lastIndexOf("}");
+  if (i1 >= 0 && i2 > i1) nettoye = nettoye.substring(i1, i2 + 1);   // ignore tout texte autour du JSON
+  let doc: DocMulti;
+  try { doc = JSON.parse(nettoye) as DocMulti; }
+  catch (e) {
+    const zone: string = nettoye.substring(700, 850);
+    return fin(workbook, "STOP ETAPE 0 : JSON illisible. " + e
+      + " | Astuce : selectionnez A1, collez dans la BARRE DE FORMULE (pas directement dans la cellule), puis Entree."
+      + " | Debut : " + nettoye.substring(0, 80) + " | Zone de l'erreur : " + zone);
+  }
+
+  wsImport.getRange("D1").setValue("en cours : etape 1 (tri exercices)...");
+  // ── 1. Tri des exercices : le plus recent = N ──────────────────────
+  const exos: Exercice[] = (doc.exercices ?? []).filter((e: Exercice) => typeof e.annee === "number");
+  exos.sort((a: Exercice, b: Exercice) => (b.annee ?? 0) - (a.annee ?? 0));
+  if (exos.length === 0) return fin(workbook, "STOP ETAPE 1 : aucun exercice avec une annee numerique. Verifiez que le JSON contient \"exercices\":[{\"annee\": 2024, ...}].");
+  const pris: Exercice[] = exos.slice(0, 5);
+  const rangDe: Map<number, string> = new Map<number, string>();
+  pris.forEach((e: Exercice, i: number) => rangDe.set(e.annee ?? 0, RANGS[i]));
+  const parAnnee: Map<number, Exercice> = new Map<number, Exercice>();
+  const doublons: number[] = [];
+  for (const e of exos) {
+    const an: number = e.annee ?? 0;
+    if (parAnnee.has(an)) { doublons.push(an); continue; }
+    parAnnee.set(an, e);
+  }
+
+  wsImport.getRange("D1").setValue("en cours : etape 2 (reset commentaires, feuilles)...");
+  // ── 2. Reset : commentaires et colonnes ────────────────────────────
+  workbook.getComments().forEach((c: ExcelScript.Comment) => c.delete());
+  const trouverFeuille = (nom: string): ExcelScript.Worksheet | undefined =>
+    workbook.getWorksheets().find((w: ExcelScript.Worksheet) => w.getName().trim().toLowerCase() === nom.toLowerCase());
+  const wsA: ExcelScript.Worksheet | undefined = trouverFeuille("Saisie actif");
+  const wsP: ExcelScript.Worksheet | undefined = trouverFeuille("Saisie passif");
+  const wsT: ExcelScript.Worksheet | undefined = trouverFeuille("Saisie TCR");
+  const e0id: Exercice = pris[0];
+  const wsSaisie: ExcelScript.Worksheet | undefined = trouverFeuille("Saisie");
+  if (wsSaisie && e0id.raison_sociale) wsSaisie.getRange("C2").setValue(e0id.raison_sociale);
+  if (!wsA || !wsP || !wsT) {
+    const presentes: string = workbook.getWorksheets().map((w: ExcelScript.Worksheet) => "[" + w.getName() + "]").join(" ");
+    return fin(workbook, "STOP ETAPE 2 : feuille introuvable. Attendues : [Saisie actif] [Saisie passif] [Saisie TCR]. Presentes : " + presentes);
+  }
+  for (const r of RANGS) {
+    wsA.getRange(CFG.ACTIF_GROUPES[r][0] + ":" + CFG.ACTIF_GROUPES[r][2]).setColumnHidden(false);
+    wsP.getRange(CFG.PASSIF_COLS[r] + ":" + CFG.PASSIF_COLS[r]).setColumnHidden(false);
+    wsT.getRange(CFG.TCR_PAIRES[r][0] + ":" + CFG.TCR_PAIRES[r][1]).setColumnHidden(false);
+  }
+
+  wsImport.getRange("D1").setValue("en cours : etape 2b (reinitialisation)...");
+  // ── 2b. Reinitialisation : vide toutes les cellules de saisie (JAMAIS les formules)
+  //        + lignes d'identification (1-3) et date d'arrete (ligne 7, actif) ──
+  let purges: number = 0;
+  const estFormule = (cell: ExcelScript.Range): boolean => {
+    const f = cell.getFormula();
+    return typeof f === "string" && f.charAt(0) === "=";   // robuste si getFormula ne renvoie pas une chaine
+  };
+  const vider = (ws: ExcelScript.Worksheet, addr: string): void => {
+    const cell: ExcelScript.Range = ws.getRange(addr);
+    if (estFormule(cell)) return;   // formule : on n'y touche pas
+    if (cell.getValue() !== "" && cell.getValue() !== null) { cell.clear(ExcelScript.ClearApplyTo.contents); purges++; }
+  };
+  for (const r of RANGS) {
+    const gA: string[] = CFG.ACTIF_GROUPES[r];
+    for (const rc of Object.keys(CFG.ACTIF_ROWS)) {
+      const rw: number = CFG.ACTIF_ROWS[rc];
+      if (CFG.ACTIF_FORMULES.indexOf(rw) >= 0) continue;
+      vider(wsA, gA[0] + rw); vider(wsA, gA[1] + rw); vider(wsA, gA[2] + rw);
+    }
+    vider(wsA, gA[0] + "1"); vider(wsA, gA[0] + "2"); vider(wsA, gA[0] + "3"); vider(wsA, gA[0] + "7");
+    const cPr: string = CFG.PASSIF_COLS[r];
+    for (const rc of Object.keys(CFG.PASSIF_ROWS)) {
+      const rw: number = CFG.PASSIF_ROWS[rc];
+      if (CFG.PASSIF_FORMULES.indexOf(rw) >= 0) continue;
+      vider(wsP, cPr + rw);
+    }
+    vider(wsP, cPr + "1"); vider(wsP, cPr + "2"); vider(wsP, cPr + "3");
+    const gT: string[] = CFG.TCR_PAIRES[r];
+    for (const rc of Object.keys(CFG.TCR_ROWS)) {
+      const rw: number = CFG.TCR_ROWS[rc];
+      if (CFG.TCR_FORMULES.indexOf(rw) >= 0) continue;
+      vider(wsT, gT[0] + rw); vider(wsT, gT[1] + rw);
+    }
+    vider(wsT, gT[0] + "1"); vider(wsT, gT[0] + "2"); vider(wsT, gT[0] + "3");
+  }
+
+  let ecrits: number = 0;
+  const k = (v: number | string | null | undefined): number | null =>
+    (typeof v === "number") ? Math.round(v / 1000 * 1000) / 1000 : null;   // DZD -> KDZD
+
+  const setSiSaisie = (ws: ExcelScript.Worksheet, addr: string, v: number | null): void => {
+    if (v === null) return;
+    const cell: ExcelScript.Range = ws.getRange(addr);
+    if (estFormule(cell)) return;   // jamais sur une formule
+    cell.setValue(v);
+    cell.setNumberFormat([["#,##0"]]);   // affichage sans decimales (les valeurs ne sont PAS arrondies)
+    ecrits++;
+  };
+
+  const totauxPDF: { [cle: string]: TotauxInfo } = {};
+  const garderPourControle = (ws: ExcelScript.Worksheet, addr: string, attendu: number | null, poste: string, annee: number): void => {
+    if (attendu === null) return;
+    totauxPDF[ws.getName() + "|" + addr] = { attendu: attendu, poste: poste, annee: annee };
+  };
+
+  // Normalise pages_trouvees : ancien format [n] ou nouveau {pages:[...], source_pdf:"..."}
+  interface InfoTab { pages: number[]; src: string; }
+  const infoTab = (exo: Exercice, code: string): InfoTab => {
+    const pt: { [code: string]: number[] | PageTab } = exo.pages_trouvees ?? {};
+    const entree: number[] | PageTab | undefined = pt[code];
+    if (!entree) return { pages: [], src: "" };
+    if (Array.isArray(entree)) return { pages: entree as number[], src: exo.source_pdf ?? "" };
+    const o: PageTab = entree as PageTab;
+    return { pages: o.pages ?? [], src: o.source_pdf ?? (exo.source_pdf ?? "") };
+  };
+
+  wsImport.getRange("D1").setValue("en cours : etape 3 (remplissage)...");
+  // ── 3. Remplissage par exercice ────────────────────────────────────
+  const anneesTri: number[] = Array.from(parAnnee.keys()).sort((a: number, b: number) => b - a);
+  for (const annee of anneesTri) {
+    const exo: Exercice = parAnnee.get(annee) as Exercice;
+    const rang: string | undefined = rangDe.get(annee);
+    if (!rang) continue;
+    const tabs: { [code: string]: { lignes?: LigneJ[] } } = exo.tableaux ?? {};
+
+    // ── ACTIF (groupes de 3 colonnes : brut / amort / net=formule) ──
+    const grA: string[] = CFG.ACTIF_GROUPES[rang];
+    const cB: string = grA[0], cAm: string = grA[1], cN: string = grA[2];
+    if (exo.exercice_clos) wsA.getRange(cB + "7").setValue(exo.exercice_clos);
+    const ligA: LigneJ[] = (tabs["ACTIF"] && tabs["ACTIF"].lignes) ? tabs["ACTIF"].lignes as LigneJ[] : [];
+    for (const lig of ligA) {
+      const row: number | undefined = CFG.ACTIF_ROWS[lig.row_code ?? ""];
+      if (!row) continue;
+      const v: { [c: string]: number | string | null } = lig.valeurs ?? {};
+      const brutV: number | null = k(v["montant_brut"]);
+      const amoV: number | null = k(v["amortissements_provisions_pertes"]);
+      const netV: number | null = k(v["net_n"]);
+      if (CFG.ACTIF_FORMULES.indexOf(row) >= 0) {
+        garderPourControle(wsA, cN + row, netV, "ACTIF/" + lig.row_code, annee);
+      } else {
+        setSiSaisie(wsA, cB + row, brutV); setSiSaisie(wsA, cAm + row, amoV);
+        garderPourControle(wsA, cN + row, netV, "ACTIF/" + lig.row_code, annee);
+      }
+    }
+    // ── PASSIF (1 colonne par exercice) ──
+    const cP: string = CFG.PASSIF_COLS[rang];
+    const ligP: LigneJ[] = (tabs["PASSIF"] && tabs["PASSIF"].lignes) ? tabs["PASSIF"].lignes as LigneJ[] : [];
+    for (const lig of ligP) {
+      const row: number | undefined = CFG.PASSIF_ROWS[lig.row_code ?? ""];
+      if (!row) continue;
+      const v: number | null = k((lig.valeurs ?? {})["n"]);
+      if (CFG.PASSIF_FORMULES.indexOf(row) >= 0) garderPourControle(wsP, cP + row, v, "PASSIF/" + lig.row_code, annee);
+      else setSiSaisie(wsP, cP + row, v);
+    }
+    // ── TCR (paires debit/credit) ──
+    const grT: string[] = CFG.TCR_PAIRES[rang];
+    const cD: string = grT[0], cC: string = grT[1];
+    const ligT: LigneJ[] = (tabs["TCR"] && tabs["TCR"].lignes) ? tabs["TCR"].lignes as LigneJ[] : [];
+    for (const lig of ligT) {
+      const row: number | undefined = CFG.TCR_ROWS[lig.row_code ?? ""];
+      if (!row) continue;
+      const v: { [c: string]: number | string | null } = lig.valeurs ?? {};
+      const dV: number | null = k(v["n_debit"]);
+      const cV: number | null = k(v["n_credit"]);
+      if (CFG.TCR_FORMULES.indexOf(row) >= 0) {
+        garderPourControle(wsT, cD + row, dV, "TCR/" + lig.row_code + " (D)", annee);
+        garderPourControle(wsT, cC + row, cV, "TCR/" + lig.row_code + " (C)", annee);
+      } else { setSiSaisie(wsT, cD + row, dV); setSiSaisie(wsT, cC + row, cV); }
+    }
+
+    // ── Identification par exercice (lignes 1-3 du modele : Designation / NIF / Source) ──
+    const nif: string = String(exo.nif ?? "").replace(/\D/g, "");   // chiffres uniquement
+    const ecrireIdent = (ws: ExcelScript.Worksheet, col: string, it: InfoTab): void => {
+      ws.getRange(col + "1").setValue(exo.raison_sociale ?? "");
+      const cNif: ExcelScript.Range = ws.getRange(col + "2");
+      cNif.setNumberFormat([["@"]]);            // format TEXTE : conserve les 15 chiffres (zero en tete)
+      cNif.setValue(nif);
+      if (!/^[0-9]{15}$/.test(nif))
+        workbook.addComment(cNif, "NIF NON CONFORME [" + annee + "] : « " + (exo.nif ?? "?") + " » — 15 chiffres attendus. Verifiez la page d'identification du PDF.", ExcelScript.ContentType.plain);
+      ws.getRange(col + "3").setValue(it.src + (it.pages.length ? " — p." + it.pages.join(",") : ""));
+    };
+    ecrireIdent(wsA, cB, infoTab(exo, "ACTIF"));
+    ecrireIdent(wsP, cP, infoTab(exo, "PASSIF"));
+    ecrireIdent(wsT, cD, infoTab(exo, "TCR"));
+  }
+
+  // ── 4. Recoupement inter-PDF : N-1 du PDF Y+1 vs N du PDF Y ───────
+  const recoup: string[] = [];
+  for (let i = 0; i < anneesTri.length - 1; i++) {
+    const yNew: number = anneesTri[i], yOld: number = anneesTri[i + 1];
+    const eNew: Exercice = parAnnee.get(yNew) as Exercice;
+    const eOld: Exercice = parAnnee.get(yOld) as Exercice;
+    let nbEcarts: number = 0;
+    const cmp = (tab: string, colNew: string, colOld: string): void => {
+      const mNew: Map<string, number> = new Map<string, number>();
+      const mOld: Map<string, number> = new Map<string, number>();
+      const lNew: LigneJ[] = (eNew.tableaux && eNew.tableaux[tab] && eNew.tableaux[tab].lignes) ? eNew.tableaux[tab].lignes as LigneJ[] : [];
+      const lOld: LigneJ[] = (eOld.tableaux && eOld.tableaux[tab] && eOld.tableaux[tab].lignes) ? eOld.tableaux[tab].lignes as LigneJ[] : [];
+      for (const l of lNew) {
+        const v = (l.valeurs ?? {})[colNew];
+        if (typeof v === "number" && l.row_code) mNew.set(l.row_code, v);
+      }
+      for (const l of lOld) {
+        const v = (l.valeurs ?? {})[colOld];
+        if (typeof v === "number" && l.row_code) mOld.set(l.row_code, v);
+      }
+      mNew.forEach((vN: number, rc: string) => {
+        const vO: number | undefined = mOld.get(rc);
+        if (vO !== undefined && Math.abs(vN - vO) > 1000) nbEcarts++;   // tolerance 1000 DZD
+      });
+    };
+    cmp("ACTIF", "net_n1", "net_n"); cmp("PASSIF", "n1", "n");
+    cmp("TCR", "n1_debit", "n_debit"); cmp("TCR", "n1_credit", "n_credit");
+    recoup.push(yOld + " : " + (nbEcarts === 0 ? "OK" : nbEcarts + " poste(s) divergent(s) entre les 2 PDF"));
+  }
+
+  wsImport.getRange("D1").setValue("en cours : etape 5 (controles)...");
+  // ── 5. Recalcul + controle des totaux + commentaires ──────────────
+  workbook.getApplication().calculate(ExcelScript.CalculationType.fullRebuild);
+  let nbAno: number = 0, nbArr: number = 0;
+  interface EcartInfo { feuille: string; adresse: string; poste: string; annee: number; attendu: number; calcule: number; ecart: number; type: string; }
+  const ecarts: EcartInfo[] = [];
+  for (const cle of Object.keys(totauxPDF)) {
+    const parts: string[] = cle.split("|");
+    const feuille: string = parts[0], addr: string = parts[1];
+    const info: TotauxInfo = totauxPDF[cle];
+    const raw = workbook.getWorksheet(feuille).getRange(addr).getValue();
+    if (typeof raw !== "number") continue;
+    const ecart: number = Math.round((raw - info.attendu) * 1000) / 1000;
+    if (ecart === 0) continue;
+    if (Math.abs(ecart) <= TOLERANCE_KDZD) { nbArr++; continue; }   // ecart <= 1000 DZD : non affiche (ni commentaire ni Checklist)
+    const cell: ExcelScript.Range = workbook.getWorksheet(feuille).getRange(addr);
+    workbook.addComment(cell,
+      "ECART [" + info.annee + "] " + info.poste
+      + " — PDF : " + info.attendu + " KDZD | Recalcule : " + raw + " KDZD | Ecart : "
+      + (ecart > 0 ? "+" : "") + ecart + " KDZD", ExcelScript.ContentType.plain);
+    nbAno++;
+    ecarts.push({ feuille: feuille, adresse: addr, poste: info.poste, annee: info.annee, attendu: info.attendu, calcule: raw, ecart: ecart, type: "ANOMALIE" });
+  }
+
+  // ── 6. Equilibre Actif = Passif par exercice ───────────────────────
+  const equil: string[] = [];
+  for (const annee of anneesTri) {
+    const rang: string | undefined = rangDe.get(annee);
+    if (!rang) continue;
+    const ta = wsA.getRange(CFG.ACTIF_GROUPES[rang][2] + "36").getValue();
+    const tp = wsP.getRange(CFG.PASSIF_COLS[rang] + "28").getValue();
+    if (typeof ta === "number" && typeof tp === "number") {
+      const e: number = Math.round((ta - tp) * 1000) / 1000;
+      equil.push(annee + " : " + (Math.abs(e) <= TOLERANCE_KDZD ? "OK" : "ECART " + (e > 0 ? "+" : "") + e + " KDZD"));
+      if (Math.abs(e) > TOLERANCE_KDZD) {
+        const c: ExcelScript.Range = wsP.getRange(CFG.PASSIF_COLS[rang] + "28");
+        workbook.addComment(c, "DESEQUILIBRE " + annee + " : Actif " + ta + " ≠ Passif " + tp + " KDZD", ExcelScript.ContentType.plain);
+        ecarts.push({ feuille: "Saisie passif", adresse: CFG.PASSIF_COLS[rang] + "28", poste: "total_general_passif", annee: annee, attendu: ta, calcule: tp, ecart: e, type: "DESEQUILIBRE" });
+      }
+    }
+  }
+
+  // ── 6b. Coherence d'identite : meme entreprise sur tous les exercices ? ──
+  const nifsVus: string[] = [], rsVues: string[] = [];
+  for (const annee of anneesTri) {
+    const e: Exercice = parAnnee.get(annee) as Exercice;
+    const n2: string = String(e.nif ?? "").replace(/\D/g, "");
+    if (n2 && nifsVus.indexOf(n2) < 0) nifsVus.push(n2);
+    const r2: string = (e.raison_sociale ?? "").trim().toLowerCase();
+    if (r2 && rsVues.indexOf(r2) < 0) rsVues.push(r2);
+  }
+  const identOK: boolean = nifsVus.length <= 1 && rsVues.length <= 1;
+  const identMsg: string = identOK
+    ? "OK — meme entreprise sur tous les exercices"
+    : "ALERTE : " + nifsVus.length + " NIF / " + rsVues.length + " designations differents — verifiez que tous les PDF appartiennent a la meme entreprise";
+
+  wsImport.getRange("D1").setValue("en cours : etape 7 (checklist)...");
+  // ── 7. Checklist : pages trouvees / non trouvees par exercice ─────
+  let wsC: ExcelScript.Worksheet | undefined = workbook.getWorksheets().find((w: ExcelScript.Worksheet) => w.getName() === FEUILLE_CHECK);
+  if (wsC) { const u = wsC.getUsedRange(); if (u) u.clear(); } else { wsC = workbook.addWorksheet(FEUILLE_CHECK); }
+  const wsCh: ExcelScript.Worksheet = wsC as ExcelScript.Worksheet;
+  const lignes: (string | number)[][] = [
+    ["DOSSIER", e0id.raison_sociale ?? "?", "", "", "", "", "", "", "", "", ""],
+    ["NIF", e0id.nif ?? "?", "Activite", e0id.activite ?? "?", "", "", "", "", "", "", ""],
+    ["CONTROLE IDENTITE", identMsg, "", "", "", "", "", "", "", "", ""],
+    ["Script", "v3.3 — reset auto + controle identite + extraction partielle", "", "", "", "", "", "", "", "", ""],
+    ["Exercice", "Rang", "Source PDF", "Cloture", "ACTIF", "PASSIF", "TCR",
+     "Recoupement N-1 inter-PDF", "Equilibre A=P", "Ecarts", "Date import"]];
+  const now: string = new Date().toLocaleString("fr-DZ");
+  const fmt = (code: string, exo: Exercice): string => {
+    const it: InfoTab = infoTab(exo, code);
+    let nb: number = 0;
+    if (exo.tableaux && exo.tableaux[code] && exo.tableaux[code].lignes) nb = (exo.tableaux[code].lignes as LigneJ[]).length;
+    if (it.pages.length === 0 && nb === 0) return "KO — non trouve";
+    const morceaux: string[] = [];
+    if (it.pages.length > 0) morceaux.push("p." + it.pages.join(","));
+    if (it.src) morceaux.push(it.src);
+    morceaux.push(nb + " lignes");
+    return (nb > 0 && nb < 8 ? "PARTIEL (" : "OK (") + morceaux.join(" — ") + ")"
+      + (nb > 0 && nb < 8 ? " — verifier le PDF (scan ?)" : "");
+  };
+  const nbEcartsAnnee = (an: number): number => ecarts.filter((ec: EcartInfo) => ec.annee === an).length;
+  const dataStart: number = 5;   // index (0-based) de la 1re ligne de donnees (4 lignes d'en-tete + titre tableau)
+  for (const annee of anneesTri) {
+    const exo: Exercice = parAnnee.get(annee) as Exercice;
+    const rang: string = rangDe.get(annee) ?? "-";
+    const rec: string = recoup.find((r: string) => r.startsWith(String(annee))) ?? "—";
+    const eq: string = equil.find((r: string) => r.startsWith(String(annee))) ?? "—";
+    const srcs: string[] = [];
+    for (const code of ["ACTIF", "PASSIF", "TCR"]) {
+      const s2: string = infoTab(exo, code).src;
+      if (s2 && srcs.indexOf(s2) < 0) srcs.push(s2);
+    }
+    if (srcs.length === 0 && exo.source_pdf) srcs.push(exo.source_pdf);
+    lignes.push([annee, rang, srcs.length ? srcs.join(" + ") : "?", exo.exercice_clos ?? "?",
+      fmt("ACTIF", exo), fmt("PASSIF", exo), fmt("TCR", exo), rec, eq, nbEcartsAnnee(annee), now]);
+  }
+  for (const d of doublons) lignes.push([d, "DOUBLON", "2 PDF portent le meme exercice — le 1er a ete retenu", "", "", "", "", "", "", "", now]);
+  const nbExo: number = pris.length;
+  for (let i = nbExo; i < 5; i++)
+    lignes.push(["—", RANGS[i] + " (non trouve)", "", "", "KO", "KO", "KO", "", "", "", now]);
+  const dataEnd: number = lignes.length;   // fin du tableau des exercices
+  // ── Section detail des ecarts (sans toucher aux couleurs des feuilles de saisie) ──
+  lignes.push(["", "", "", "", "", "", "", "", "", "", ""]);
+  lignes.push(["ECARTS DETECTES (> 1000 DZD)", "(commentaires sur les cellules + cette liste — les ecarts de 1000 DZD ou moins ne sont pas affiches)", "", "", "", "", "", "", "", "", ""]);
+  lignes.push(["Feuille", "Cellule", "Poste", "Exercice", "PDF (KDZD)", "Recalcule (KDZD)", "Ecart (KDZD)", "Type", "", "", ""]);
+  const ecartsHeader: number = lignes.length - 1;
+  if (ecarts.length === 0) lignes.push(["Aucun ecart superieur a 1000 DZD", "", "", "", "", "", "", "", "", "", ""]);
+  for (const ec of ecarts)
+    lignes.push([ec.feuille, ec.adresse, ec.poste, ec.annee, ec.attendu, ec.calcule, ec.ecart, ec.type, "", "", ""]);
+  wsCh.getRangeByIndexes(0, 0, lignes.length, 11).setValues(lignes);
+  wsCh.getRange("A1:K1").getFormat().getFont().setBold(true);
+  wsCh.getRange("A5:K5").getFormat().getFont().setBold(true);
+  if (!identOK) wsCh.getRangeByIndexes(2, 0, 1, 11).getFormat().getFill().setColor(ROUGE);   // ligne CONTROLE IDENTITE
+  wsCh.getRangeByIndexes(ecartsHeader, 0, 1, 8).getFormat().getFont().setBold(true);
+  for (let r = dataStart; r < dataEnd; r++) {
+    for (let c = 4; c <= 6; c++) {
+      const cell: ExcelScript.Range = wsCh.getRangeByIndexes(r, c, 1, 1);
+      const t2: string = String(cell.getValue());
+      cell.getFormat().getFill().setColor(t2.startsWith("OK") ? VERT : (t2.startsWith("PARTIEL") ? JAUNE : ROUGE));
+    }
+  }
+  for (let r = ecartsHeader + 1; r < lignes.length; r++) {
+    const t: string = String(wsCh.getRangeByIndexes(r, 7, 1, 1).getValue());
+    if (t === "ANOMALIE" || t === "DESEQUILIBRE") wsCh.getRangeByIndexes(r, 0, 1, 8).getFormat().getFill().setColor(ROUGE);
+  }
+  wsCh.getRange("A:K").getFormat().autofitColumns();
+
+  // ── 8. Masquer les exercices non trouves ──────────────────────────
+  for (let i = nbExo; i < 5; i++) {
+    const r: string = RANGS[i];
+    wsA.getRange(CFG.ACTIF_GROUPES[r][0] + ":" + CFG.ACTIF_GROUPES[r][2]).setColumnHidden(true);
+    wsP.getRange(CFG.PASSIF_COLS[r] + ":" + CFG.PASSIF_COLS[r]).setColumnHidden(true);
+    wsT.getRange(CFG.TCR_PAIRES[r][0] + ":" + CFG.TCR_PAIRES[r][1]).setColumnHidden(true);
+  }
+
+  let resume: string = "Exercices importes : " + pris.map((e: Exercice) => rangDe.get(e.annee ?? 0) + "=" + e.annee).join(", ")
+    + " | Cellules reinitialisees : " + purges + " | Cellules ecrites : " + ecrits
+    + " | Ecarts > 1000 DZD : " + nbAno + (nbArr > 0 ? " | ecarts <= 1000 DZD masques : " + nbArr : "")
+    + " | Identite : " + (identOK ? "OK" : "ALERTE")
+    + (doublons.length ? " | DOUBLONS : " + doublons.join(",") : "");
+  if (ecrits === 0) resume += " | ATTENTION : 0 cellule ecrite — verifiez que les row_code du JSON sont ceux du prompt P1 (ex. terrains, capital_emis).";
+  wsCh.getRangeByIndexes(lignes.length + 1, 0, 1, 1).setValue(resume + diagLu);
+  return fin(workbook, resume + diagLu);
+  } catch (err) {
+    let etape: string = "?";
+    try { etape = String(wsImport.getRange("D1").getValue() ?? "?"); } catch (e2) { /* ignore */ }
+    let detail: string;
+    try {
+      if (err instanceof Error) detail = err.name + " : " + err.message + (err.stack ? " | pile : " + err.stack.substring(0, 300) : "");
+      else detail = JSON.stringify(err);   // objets d'erreur Office Scripts {code, message}
+    } catch (e3) { detail = String(err); }
+    return fin(workbook, "ERREUR D'EXECUTION a [" + etape + "] : " + detail);
+  }
+}
